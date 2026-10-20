@@ -1,181 +1,506 @@
-# Uptime Monitor (UptimeRobot jaisa API Monitoring Tool)
 
-Full stack project: **Java 17 + Spring Boot 3 + Maven + MySQL + React (Vite)**.
-User apne websites / API URLs add karta hai. Backend har X second me unhe ping karta hai,
-response time aur status MySQL me save karta hai, website down hone par incident banata hai
-aur alert (email / Slack / Discord webhook) bhejta hai. React dashboard me live status aur charts dikhte hain.
+# API Uptime Monitor
+
+An uptime and API monitoring platform in the style of UptimeRobot, built with **Java 17, Spring Boot 3, Maven, MySQL and React (Vite)**.
+
+Users add their websites or API URLs, and the backend pings them at a configurable interval, saving the response time and status in MySQL. When a website goes down, the system opens an incident and sends an alert by email, Slack or Discord webhook. The React dashboard shows live status, uptime percentages and response-time charts.
 
 ---
 
-## 1. Kya-kya chahiye (Prerequisites)
+## Features
 
-| Cheez | Version |
-|---|---|
-| JDK | 17 ya usse upar |
-| Maven | 3.8+ |
-| Node.js | 18+ |
-| MySQL | 8.x (running, port 3306) |
+- **Authentication:** register and log in with JWT (Spring Security, BCrypt password hashing). Roles: `USER` and `ADMIN`. The first registered user becomes `ADMIN`.
+- **Monitor management:** create, edit, delete, pause and resume monitors. Configure the URL, HTTP method (GET or HEAD), check interval (10 seconds to 1 hour), timeout and expected status code.
+- **Check now:** trigger an immediate check from the dashboard.
+- **Scheduled health checks:** a scheduler finds due monitors every 5 seconds and runs the checks in parallel on a fixed thread pool.
+- **Check history:** every check stores its status, HTTP status code, response time and error message.
+- **Incident tracking:** a monitor is marked `DOWN` after 2 consecutive failures, which opens an incident. When the monitor recovers, the incident is closed with the total downtime.
+- **Alerts:** console log, optional email (SMTP), and a Slack or Discord webhook per monitor, on both DOWN and recovery.
+- **Statistics:** uptime percentage for 24 hours, 7 days and 30 days, average response time, and a dashboard summary.
+- **Charts:** response-time chart (Recharts) with 1h, 24h, 7d and 30d ranges. Failed checks are highlighted in red.
+- **Data retention:** old check results (30 days by default) are removed automatically every night at 3 AM.
+- **API quality:** request validation, centralized exception handling, Swagger / OpenAPI docs and JUnit tests.
 
-MySQL install nahi hai? Docker hai to: `docker compose up -d` (root folder me). Ye root/root ke saath MySQL chala dega.
+## Tech Stack
 
-## 2. Run kaise kare (2 terminals)
+| Layer    | Technology                                                                  |
+| -------- | --------------------------------------------------------------------------- |
+| Backend  | Java 17, Spring Boot 3, Spring Security, Spring Data JPA / Hibernate, Maven |
+| Database | MySQL 8                                                                     |
+| Auth     | JWT (jjwt), BCrypt                                                          |
+| Frontend | React 18, Vite, React Router, Axios, Recharts                               |
+| Docs     | springdoc-openapi (Swagger UI)                                              |
+| Testing  | JUnit 5                                                                     |
 
-**Terminal 1 - Backend** (port 8080)
-```
-cd backend
-mvn spring-boot:run
-```
-(ya root folder se `start-backend.bat` / `./start-backend.sh`)
-
-**Terminal 2 - Frontend** (port 5173)
-```
-cd frontend
-npm install
-npm run dev
-```
-(ya `start-frontend.bat` / `./start-frontend.sh`)
-
-Phir browser me kholo: **http://localhost:5173**
-
-Koi demo / hardcoded user nahi hai. **Register page** par apna name, email, password daalke account banao
-aur phir usi se login karo. Sabse pehla registered user automatically ADMIN banta hai.
-
-### Database ke baare me (ek hi cheez check karni hai)
-- Database `uptime_monitor` aur saari tables **khud ban jati hain**, kuch manually nahi banana.
-- Default MySQL login: **username `root`, password `root`**, host `localhost:3306`.
-- Tumhara MySQL password alag hai? Ya to environment variable set karo:
-  - Windows (cmd): `set DB_PASSWORD=tumhara_password` phir `mvn spring-boot:run`
-  - Mac/Linux: `DB_PASSWORD=tumhara_password mvn spring-boot:run`
-  - ya `backend/src/main/resources/application.properties` me `spring.datasource.password` badal do.
-- Poori list: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`.
-
-### Useful links
-- Swagger API docs: http://localhost:8080/swagger-ui.html
-- Health endpoint: http://localhost:8080/api/health
-
-## 3. Features
-
-- JWT login / register (Spring Security, BCrypt, roles: USER / ADMIN)
-- Monitor CRUD: name, URL, GET/HEAD, interval (10s - 1h), timeout, expected status code
-- Pause / Resume / "Check now"
-- **Scheduler + thread pool**: har 5 sec me due monitors dhundh ke parallel checks chalte hain
-- Response time + status code + error message har check ka save hota hai
-- **Incident tracking**: lagatar 2 failures par DOWN + incident open, recover hone par incident close + downtime duration
-- **Alerts**: console log, email (optional SMTP), Slack/Discord webhook (per monitor)
-- Uptime % (24h / 7d / 30d), average response time, dashboard summary
-- Response time chart (Recharts) with 1h / 24h / 7d / 30d range, DOWN points red me
-- Roz raat 3 baje purana data cleanup (30 din retention)
-- Global exception handling, validation, Swagger docs, unit tests (JUnit)
-
-### Email alerts on karna (optional)
-`application.properties` me ya environment variables se:
-```
-ALERT_EMAIL_ENABLED=true
-MAIL_HOST=smtp.gmail.com
-MAIL_PORT=587
-MAIL_USERNAME=tumhari_email@gmail.com
-MAIL_PASSWORD=gmail_app_password
-```
-
-## 4. Project structure
+## Architecture
 
 ```
-uptime-monitor/
+React  --JWT-->  REST API (Spring Security)  -->  MySQL
+                      |
+        MonitorScheduler (@Scheduled, every 5s)
+                      |  finds due monitors
+                      v
+        ExecutorService (10 threads)  -->  HttpCheckService (java.net.http.HttpClient)
+                      |
+                      v
+        MonitorCheckProcessor:  save result -> update status -> open/close incident -> AlertService
+```
+
+Key design decisions:
+
+1. **The HTTP call runs outside the database transaction.** A slow website never holds a database connection.
+2. **`nextCheckAt` is updated before dispatching.** The scheduler never dispatches the same monitor twice, and an in-flight set prevents overlapping checks.
+3. **Failure threshold of 2.** A single temporary glitch does not trigger a false alarm, which avoids flapping between UP and DOWN.
+4. **Alerts are sent after the transaction commits.** No email or webhook call happens inside a database transaction.
+5. **Chart downsampling.** If a range has more than 300 points, it is thinned out, but failed checks are always kept.
+6. **Ownership checks.** Every monitor query is scoped to the owner, so users can never access each other's data.
+
+## Project Structure
+
+```
+api-uptime-monitor/
 ├── backend/                    Spring Boot (Maven)
+│   ├── Dockerfile
 │   └── src/main/java/com/aman/uptime/
 │       ├── config/             Security, CORS, thread pool
-│       ├── security/           JWT service + filter
+│       ├── security/           JWT service and filter
 │       ├── entity/             User, Monitor, CheckResult, Incident
 │       ├── repository/         Spring Data JPA repositories
-│       ├── dto/                Request / response records
+│       ├── dto/                Request and response records
 │       ├── service/            Business logic (checks, alerts, stats)
 │       ├── scheduler/          MonitorScheduler (@Scheduled)
 │       ├── controller/         REST controllers
 │       └── exception/          Global error handler
 ├── frontend/                   React + Vite
-│   └── src/ pages/ components/ api.js auth.jsx
+│   └── src/                    pages/, components/, api.js, auth.jsx
 ├── database/schema.sql         Optional manual MySQL setup
 ├── docker-compose.yml          Optional local MySQL
 └── README.md
 ```
 
-## 5. Architecture (interview me ye explain karo)
+## Getting Started (Local)
+
+### Prerequisites
+
+| Tool    | Version                    |
+| ------- | -------------------------- |
+| JDK     | 17 or higher               |
+| Maven   | 3.8+                       |
+| Node.js | 18+                        |
+| MySQL   | 8.x (running on port 3306) |
+
+If you do not have MySQL installed but have Docker, run `docker compose up -d` in the project root. It starts MySQL 8 with user `root` and password `root`.
+
+### 1. Start the backend (port 8080)
+
+```bash
+cd backend
+mvn spring-boot:run
+```
+
+You can also use `start-backend.bat` (Windows) or `./start-backend.sh` (macOS / Linux) from the project root.
+
+### 2. Start the frontend (port 5173)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+You can also use `start-frontend.bat` or `./start-frontend.sh`.
+
+### 3. Open the app
+
+Go to **http://localhost:5173**, create an account on the Register page, and log in. There are no hardcoded or demo users.
+
+### Database configuration
+
+- The database `uptime_monitor` and all tables are created automatically on first run (`spring.jpa.hibernate.ddl-auto=update`). No manual setup is needed.
+- The default connection is `root` / `root` on `localhost:3306`.
+- If your MySQL credentials are different, set environment variables before starting the backend:
+  - Windows PowerShell: `$env:DB_PASSWORD="your_password"`
+  - Windows cmd: `set DB_PASSWORD=your_password`
+  - macOS / Linux: `export DB_PASSWORD=your_password`
+- Never commit your real password to the repository. Always pass it through environment variables.
+- If you prefer to create the tables manually, run `database/schema.sql` in MySQL.
+
+### Useful links
+
+- Swagger UI: http://localhost:8080/swagger-ui.html
+- Health endpoint: http://localhost:8080/api/health
+
+## Configuration
+
+### Backend environment variables
+
+| Variable                                                           | Purpose                                                 | Default                      |
+| ------------------------------------------------------------------ | ------------------------------------------------------- | ---------------------------- |
+| `DB_URL`                                                         | Full JDBC URL (overrides the host, port and name below) | built from the values below  |
+| `DB_HOST`                                                        | MySQL host                                              | `localhost`                |
+| `DB_PORT`                                                        | MySQL port                                              | `3306`                     |
+| `DB_NAME`                                                        | Database name                                           | `uptime_monitor`           |
+| `DB_USERNAME`                                                    | MySQL user                                              | `root`                     |
+| `DB_PASSWORD`                                                    | MySQL password                                          | `root`                     |
+| `DB_PARAMS`                                                      | Extra JDBC parameters (for example, SSL options)        | local-friendly defaults      |
+| `JWT_SECRET`                                                     | Secret used to sign tokens (32+ characters)             | development value, change it |
+| `CORS_ORIGINS`                                                   | Extra allowed origins, comma separated                  | `http://localhost:5173`    |
+| `PORT`                                                           | Server port                                             | `8080`                     |
+| `ALERT_EMAIL_ENABLED`                                            | Turn on email alerts                                    | `false`                    |
+| `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD` | SMTP settings                                           | Gmail SMTP host and port     |
+
+`*.vercel.app` and `*.netlify.app` origins are already allowed by CORS. Railway MySQL variables (`MYSQLHOST`, `MYSQLPORT`, `MYSQLUSER`, `MYSQLPASSWORD`, `MYSQLDATABASE`) are picked up automatically.
+
+### Frontend environment variable
+
+| Variable         | Purpose                                      |
+| ---------------- | -------------------------------------------- |
+| `VITE_API_URL` | Backend base URL, needed only for deployment |
+
+### Enabling email alerts
 
 ```
-React  --JWT-->  REST API (Spring Security)  --> MySQL
-                      |
-        MonitorScheduler (@Scheduled, har 5s)
-                      |  due monitors dhundhta hai
-                      v
-        ExecutorService (10 threads)  --> HttpCheckService (java.net.http.HttpClient)
-                      |
-                      v
-        MonitorCheckProcessor:  result save -> status update -> incident open/close -> AlertService
+ALERT_EMAIL_ENABLED=true
+MAIL_HOST=smtp.gmail.com
+MAIL_PORT=587
+MAIL_USERNAME=your_email@gmail.com
+MAIL_PASSWORD=your_gmail_app_password
 ```
 
-Important design decisions:
-1. **HTTP call transaction ke bahar** - slow website ki wajah se DB connection block nahi hota.
-2. **`nextCheckAt` pehle update** - scheduler dubara wahi monitor dispatch nahi karta, plus `inFlight` set se overlap nahi hota.
-3. **Failure threshold (2)** - ek temporary glitch par false alarm nahi aata (flapping se bachav).
-4. **Alerts commit ke baad** - DB transaction ke andar email bhejna avoid kiya.
-5. **Chart downsampling** - 300 se zyada points ho to kam kiye jate hain, par failed checks hamesha rakhe jate hain.
-6. **Ownership check** - har monitor query me owner id check hota hai, doosre user ka data access nahi hota.
+## API Overview
 
-## 6. Resume ke liye
+| Method | Endpoint                         | Description                         | Auth   |
+| ------ | -------------------------------- | ----------------------------------- | ------ |
+| POST   | `/api/auth/register`           | Create an account                   | Public |
+| POST   | `/api/auth/login`              | Log in and receive a JWT            | Public |
+| GET    | `/api/auth/me`                 | Current user                        | JWT    |
+| GET    | `/api/monitors`                | List your monitors                  | JWT    |
+| POST   | `/api/monitors`                | Create a monitor                    | JWT    |
+| GET    | `/api/monitors/{id}`           | Get one monitor                     | JWT    |
+| PUT    | `/api/monitors/{id}`           | Update a monitor                    | JWT    |
+| DELETE | `/api/monitors/{id}`           | Delete a monitor and its history    | JWT    |
+| POST   | `/api/monitors/{id}/pause`     | Pause a monitor                     | JWT    |
+| POST   | `/api/monitors/{id}/resume`    | Resume a monitor                    | JWT    |
+| POST   | `/api/monitors/{id}/check`     | Run a check immediately             | JWT    |
+| GET    | `/api/monitors/{id}/results`   | Check history (`?hours=24`)       | JWT    |
+| GET    | `/api/monitors/{id}/stats`     | Uptime and response-time statistics | JWT    |
+| GET    | `/api/monitors/{id}/incidents` | Incidents for a monitor             | JWT    |
+| GET    | `/api/dashboard`               | Dashboard summary                   | JWT    |
+| GET    | `/api/incidents`               | Recent incidents (`?limit=20`)    | JWT    |
+| GET    | `/api/health`                  | Service health                      | Public |
+| GET    | `/api/admin/overview`          | System-wide counts                  | ADMIN  |
 
-**Project title:** API Uptime & Monitoring Platform | Java, Spring Boot, MySQL, React
+Full interactive documentation is available in Swagger UI.
 
-- Built a full-stack uptime monitoring platform (UptimeRobot-style) with Spring Boot, MySQL and React; users monitor HTTP endpoints at configurable intervals and view live status, uptime % and response-time charts.
-- Designed a scheduler-driven engine (`@Scheduled` + fixed thread pool) that runs health checks in parallel without blocking DB transactions, with overlap protection for in-flight checks.
-- Implemented incident tracking with a consecutive-failure threshold to avoid false alerts, plus email and Slack/Discord webhook notifications on DOWN and recovery.
-- Secured the REST API with JWT and role-based access (Spring Security), added validation, centralized exception handling, Swagger docs and JUnit tests.
+## Database Schema
 
-Resume me numbers jodna ho to khud test karke likho (jaise "monitors N endpoints every 30s"), jo tumne actually chalaya ho wahi likhna.
+| Table             | Purpose                                               |
+| ----------------- | ----------------------------------------------------- |
+| `users`         | Accounts, hashed passwords and roles                  |
+| `monitors`      | Monitor settings and current status (owned by a user) |
+| `check_results` | One row per executed check                            |
+| `incidents`     | Downtime periods with start, end and reason           |
 
-## 7. Agla step (aur impressive banane ke liye)
+Relationships: a user has many monitors, and a monitor has many check results and incidents.
 
-- Redis caching / rate limiting
-- Public status page (`/status/{slug}`)
-- Dockerfile for backend + frontend, CI/CD with GitHub Actions
+## Deployment
+
+Vercel and Netlify host only the **frontend**. The Spring Boot backend needs a Java host, so the app is deployed in three parts. All three have free tiers.
+
+| Part     | Where                          | How                                                                                          |
+| -------- | ------------------------------ | -------------------------------------------------------------------------------------------- |
+| MySQL    | Railway, Aiven or Clever Cloud | Create a MySQL service and note the host, user and password                                  |
+| Backend  | Render or Railway (Docker)     | Connect the GitHub repo and set the root directory to `backend` (a Dockerfile is included) |
+| Frontend | Vercel or Netlify              | Root directory `frontend`, build command `npm run build`, output `dist`                |
+
+**Backend environment variables** (set in the Render or Railway dashboard):
+
+```
+DB_HOST, DB_PORT, DB_NAME, DB_USERNAME, DB_PASSWORD   (or a single DB_URL)
+JWT_SECRET=<a long random string, 32+ characters>
+```
+
+- Tables are created on startup. The `PORT` variable is provided by the host.
+- If your cloud MySQL requires SSL (for example, Aiven), set `DB_PARAMS=useSSL=true&serverTimezone=UTC`.
+- For a custom frontend domain, add it to `CORS_ORIGINS`.
+
+**Frontend environment variable** (set in the Vercel or Netlify dashboard):
+
+```
+VITE_API_URL=https://your-backend.onrender.com
+```
+
+`vercel.json` and `netlify.toml` are included so that page refreshes work with client-side routing.
+
+> Note: Render's free tier puts the backend to sleep after about 15 minutes without traffic, which pauses monitoring. For continuous 24/7 monitoring, use an always-on plan or Railway.
+
+## Troubleshooting
+
+| Problem                           | Solution                                                                 |
+| --------------------------------- | ------------------------------------------------------------------------ |
+| `Access denied for user 'root'` | Your MySQL password differs from the default. Set `DB_PASSWORD`.       |
+| `Communications link failure`   | MySQL is not running. Start it (or run `docker compose up -d`).        |
+| Port 8080 or 5173 already in use  | Change `server.port` or stop the other process.                        |
+| Monitor stays "Pending"           | Wait 5-10 seconds for the first check to finish.                         |
+| `npm install` fails on Windows  | Run `npm cache clean --force`, delete `node_modules`, and try again. |
+
+## Roadmap
+
+- Redis caching and rate limiting
+- Public status pages (`/status/{slug}`)
+- CI/CD with GitHub Actions
 - More tests (Mockito for `MonitorCheckProcessor`, `@DataJpaTest`)
-- SSRF protection: production me private IP ranges (localhost, 10.x, 192.168.x) block karo (abhi local demo ke liye allowed hain)
+- SSRF protection: block private IP ranges (localhost, 10.x, 192.168.x) in production. They are currently allowed to make local testing easy.
 
-## 8. Troubleshooting
+# API Uptime Monitor
 
-| Problem | Solution |
-|---|---|
-| `Access denied for user 'root'` | MySQL password alag hai, `DB_PASSWORD` set karo (upar dekho) |
-| `Communications link failure` | MySQL running nahi hai, start karo (ya `docker compose up -d`) |
-| Port 8080 / 5173 busy | `server.port` badlo ya doosra process band karo |
-| Monitor "Pending" dikhe | 5-10 second ruko, pehla check abhi chal raha hai |
+An uptime and API monitoring platform in the style of UptimeRobot, built with **Java 17, Spring Boot 3, Maven, MySQL and React (Vite)**.
 
-## 9. Live deploy (Vercel / Netlify + backend + MySQL)
+Users add their websites or API URLs, and the backend pings them at a configurable interval, saving the response time and status in MySQL. When a website goes down, the system opens an incident and sends an alert by email, Slack or Discord webhook. The React dashboard shows live status, uptime percentages and response-time charts.
 
-**Important:** Vercel aur Netlify sirf *frontend* (React) host karte hain. Spring Boot backend ko Java server chahiye,
-isliye 3 hisse alag deploy hote hain (teeno ka free tier hai):
+---
 
-| Hissa | Kahan | Kaise |
-|---|---|---|
-| MySQL | Railway / Aiven / Clever Cloud | MySQL service banao, uski host/user/password details note karo |
-| Backend | Render / Railway (Docker) | GitHub repo connect karo, root directory = `backend` (Dockerfile ready hai) |
-| Frontend | Vercel / Netlify | root directory = `frontend`, build command `npm run build`, output `dist` |
+## Features
 
-**Backend ke environment variables** (Render/Railway dashboard me):
+- **Authentication:** register and log in with JWT (Spring Security, BCrypt password hashing). Roles: `USER` and `ADMIN`. The first registered user becomes `ADMIN`.
+- **Monitor management:** create, edit, delete, pause and resume monitors. Configure the URL, HTTP method (GET or HEAD), check interval (10 seconds to 1 hour), timeout and expected status code.
+- **Check now:** trigger an immediate check from the dashboard.
+- **Scheduled health checks:** a scheduler finds due monitors every 5 seconds and runs the checks in parallel on a fixed thread pool.
+- **Check history:** every check stores its status, HTTP status code, response time and error message.
+- **Incident tracking:** a monitor is marked `DOWN` after 2 consecutive failures, which opens an incident. When the monitor recovers, the incident is closed with the total downtime.
+- **Alerts:** console log, optional email (SMTP), and a Slack or Discord webhook per monitor, on both DOWN and recovery.
+- **Statistics:** uptime percentage for 24 hours, 7 days and 30 days, average response time, and a dashboard summary.
+- **Charts:** response-time chart (Recharts) with 1h, 24h, 7d and 30d ranges. Failed checks are highlighted in red.
+- **Data retention:** old check results (30 days by default) are removed automatically every night at 3 AM.
+- **API quality:** request validation, centralized exception handling, Swagger / OpenAPI docs and JUnit tests.
+
+## Tech Stack
+
+| Layer    | Technology                                                                  |
+| -------- | --------------------------------------------------------------------------- |
+| Backend  | Java 17, Spring Boot 3, Spring Security, Spring Data JPA / Hibernate, Maven |
+| Database | MySQL 8                                                                     |
+| Auth     | JWT (jjwt), BCrypt                                                          |
+| Frontend | React 18, Vite, React Router, Axios, Recharts                               |
+| Docs     | springdoc-openapi (Swagger UI)                                              |
+| Testing  | JUnit 5                                                                     |
+
+## Architecture
+
 ```
-DB_HOST, DB_PORT, DB_NAME, DB_USERNAME, DB_PASSWORD     (ya sirf DB_URL = poora jdbc:mysql://... url)
-JWT_SECRET = koi bhi lamba random string (32+ characters)
+React  --JWT-->  REST API (Spring Security)  -->  MySQL
+                      |
+        MonitorScheduler (@Scheduled, every 5s)
+                      |  finds due monitors
+                      v
+        ExecutorService (10 threads)  -->  HttpCheckService (java.net.http.HttpClient)
+                      |
+                      v
+        MonitorCheckProcessor:  save result -> update status -> open/close incident -> AlertService
 ```
-- Railway par MySQL isi project me banaya to `MYSQLHOST` jaise variables apne aap pad liye jate hain.
-- Database tables startup par khud ban jati hain. `PORT` cloud khud deta hai.
-- Cloud MySQL SSL maangta ho (jaise Aiven) to `DB_PARAMS=useSSL=true&serverTimezone=UTC` set karo.
-- CORS me `*.vercel.app` aur `*.netlify.app` pehle se allowed hain, kuch badalna nahi. Custom domain ho to `CORS_ORIGINS` me daalo.
 
-**Frontend ka ek hi environment variable** (Vercel/Netlify dashboard -> Environment Variables):
-```
-VITE_API_URL = https://tumhara-backend.onrender.com
-```
-Ye kisi file me edit nahi karna, bas dashboard me daalna hai (backend ka URL deploy ke baad hi pata chalta hai, isliye
-code me pehle se likhna possible nahi). `vercel.json` / `netlify.toml` (page refresh par routing) already included hain.
+Key design decisions:
 
-Free tier note: Render ka free backend 15 min idle rehne par sleep ho jata hai, to us dauran monitoring ruk jati hai.
-Real 24x7 monitoring ke liye always-on plan ya Railway use karo.
+1. **The HTTP call runs outside the database transaction.** A slow website never holds a database connection.
+2. **`nextCheckAt` is updated before dispatching.** The scheduler never dispatches the same monitor twice, and an in-flight set prevents overlapping checks.
+3. **Failure threshold of 2.** A single temporary glitch does not trigger a false alarm, which avoids flapping between UP and DOWN.
+4. **Alerts are sent after the transaction commits.** No email or webhook call happens inside a database transaction.
+5. **Chart downsampling.** If a range has more than 300 points, it is thinned out, but failed checks are always kept.
+6. **Ownership checks.** Every monitor query is scoped to the owner, so users can never access each other's data.
+
+## Project Structure
+
+```
+api-uptime-monitor/
+├── backend/                    Spring Boot (Maven)
+│   ├── Dockerfile
+│   └── src/main/java/com/aman/uptime/
+│       ├── config/             Security, CORS, thread pool
+│       ├── security/           JWT service and filter
+│       ├── entity/             User, Monitor, CheckResult, Incident
+│       ├── repository/         Spring Data JPA repositories
+│       ├── dto/                Request and response records
+│       ├── service/            Business logic (checks, alerts, stats)
+│       ├── scheduler/          MonitorScheduler (@Scheduled)
+│       ├── controller/         REST controllers
+│       └── exception/          Global error handler
+├── frontend/                   React + Vite
+│   └── src/                    pages/, components/, api.js, auth.jsx
+├── database/schema.sql         Optional manual MySQL setup
+├── docker-compose.yml          Optional local MySQL
+└── README.md
+```
+
+## Getting Started (Local)
+
+### Prerequisites
+
+| Tool    | Version                    |
+| ------- | -------------------------- |
+| JDK     | 17 or higher               |
+| Maven   | 3.8+                       |
+| Node.js | 18+                        |
+| MySQL   | 8.x (running on port 3306) |
+
+If you do not have MySQL installed but have Docker, run `docker compose up -d` in the project root. It starts MySQL 8 with user `root` and password `root`.
+
+### 1. Start the backend (port 8080)
+
+```bash
+cd backend
+mvn spring-boot:run
+```
+
+You can also use `start-backend.bat` (Windows) or `./start-backend.sh` (macOS / Linux) from the project root.
+
+### 2. Start the frontend (port 5173)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+You can also use `start-frontend.bat` or `./start-frontend.sh`.
+
+### 3. Open the app
+
+Go to **http://localhost:5173**, create an account on the Register page, and log in. There are no hardcoded or demo users.
+
+### Database configuration
+
+- The database `uptime_monitor` and all tables are created automatically on first run (`spring.jpa.hibernate.ddl-auto=update`). No manual setup is needed.
+- The default connection is `root` / `root` on `localhost:3306`.
+- If your MySQL credentials are different, set environment variables before starting the backend:
+  - Windows PowerShell: `$env:DB_PASSWORD="your_password"`
+  - Windows cmd: `set DB_PASSWORD=your_password`
+  - macOS / Linux: `export DB_PASSWORD=your_password`
+- Never commit your real password to the repository. Always pass it through environment variables.
+- If you prefer to create the tables manually, run `database/schema.sql` in MySQL.
+
+### Useful links
+
+- Swagger UI: http://localhost:8080/swagger-ui.html
+- Health endpoint: http://localhost:8080/api/health
+
+## Configuration
+
+### Backend environment variables
+
+| Variable                                                           | Purpose                                                 | Default                      |
+| ------------------------------------------------------------------ | ------------------------------------------------------- | ---------------------------- |
+| `DB_URL`                                                         | Full JDBC URL (overrides the host, port and name below) | built from the values below  |
+| `DB_HOST`                                                        | MySQL host                                              | `localhost`                |
+| `DB_PORT`                                                        | MySQL port                                              | `3306`                     |
+| `DB_NAME`                                                        | Database name                                           | `uptime_monitor`           |
+| `DB_USERNAME`                                                    | MySQL user                                              | `root`                     |
+| `DB_PASSWORD`                                                    | MySQL password                                          | `root`                     |
+| `DB_PARAMS`                                                      | Extra JDBC parameters (for example, SSL options)        | local-friendly defaults      |
+| `JWT_SECRET`                                                     | Secret used to sign tokens (32+ characters)             | development value, change it |
+| `CORS_ORIGINS`                                                   | Extra allowed origins, comma separated                  | `http://localhost:5173`    |
+| `PORT`                                                           | Server port                                             | `8080`                     |
+| `ALERT_EMAIL_ENABLED`                                            | Turn on email alerts                                    | `false`                    |
+| `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD` | SMTP settings                                           | Gmail SMTP host and port     |
+
+`*.vercel.app` and `*.netlify.app` origins are already allowed by CORS. Railway MySQL variables (`MYSQLHOST`, `MYSQLPORT`, `MYSQLUSER`, `MYSQLPASSWORD`, `MYSQLDATABASE`) are picked up automatically.
+
+### Frontend environment variable
+
+| Variable         | Purpose                                      |
+| ---------------- | -------------------------------------------- |
+| `VITE_API_URL` | Backend base URL, needed only for deployment |
+
+### Enabling email alerts
+
+```
+ALERT_EMAIL_ENABLED=true
+MAIL_HOST=smtp.gmail.com
+MAIL_PORT=587
+MAIL_USERNAME=your_email@gmail.com
+MAIL_PASSWORD=your_gmail_app_password
+```
+
+## API Overview
+
+| Method | Endpoint                         | Description                         | Auth   |
+| ------ | -------------------------------- | ----------------------------------- | ------ |
+| POST   | `/api/auth/register`           | Create an account                   | Public |
+| POST   | `/api/auth/login`              | Log in and receive a JWT            | Public |
+| GET    | `/api/auth/me`                 | Current user                        | JWT    |
+| GET    | `/api/monitors`                | List your monitors                  | JWT    |
+| POST   | `/api/monitors`                | Create a monitor                    | JWT    |
+| GET    | `/api/monitors/{id}`           | Get one monitor                     | JWT    |
+| PUT    | `/api/monitors/{id}`           | Update a monitor                    | JWT    |
+| DELETE | `/api/monitors/{id}`           | Delete a monitor and its history    | JWT    |
+| POST   | `/api/monitors/{id}/pause`     | Pause a monitor                     | JWT    |
+| POST   | `/api/monitors/{id}/resume`    | Resume a monitor                    | JWT    |
+| POST   | `/api/monitors/{id}/check`     | Run a check immediately             | JWT    |
+| GET    | `/api/monitors/{id}/results`   | Check history (`?hours=24`)       | JWT    |
+| GET    | `/api/monitors/{id}/stats`     | Uptime and response-time statistics | JWT    |
+| GET    | `/api/monitors/{id}/incidents` | Incidents for a monitor             | JWT    |
+| GET    | `/api/dashboard`               | Dashboard summary                   | JWT    |
+| GET    | `/api/incidents`               | Recent incidents (`?limit=20`)    | JWT    |
+| GET    | `/api/health`                  | Service health                      | Public |
+| GET    | `/api/admin/overview`          | System-wide counts                  | ADMIN  |
+
+Full interactive documentation is available in Swagger UI.
+
+## Database Schema
+
+| Table             | Purpose                                               |
+| ----------------- | ----------------------------------------------------- |
+| `users`         | Accounts, hashed passwords and roles                  |
+| `monitors`      | Monitor settings and current status (owned by a user) |
+| `check_results` | One row per executed check                            |
+| `incidents`     | Downtime periods with start, end and reason           |
+
+Relationships: a user has many monitors, and a monitor has many check results and incidents.
+
+## Deployment
+
+Vercel and Netlify host only the **frontend**. The Spring Boot backend needs a Java host, so the app is deployed in three parts. All three have free tiers.
+
+| Part     | Where                          | How                                                                                          |
+| -------- | ------------------------------ | -------------------------------------------------------------------------------------------- |
+| MySQL    | Railway, Aiven or Clever Cloud | Create a MySQL service and note the host, user and password                                  |
+| Backend  | Render or Railway (Docker)     | Connect the GitHub repo and set the root directory to `backend` (a Dockerfile is included) |
+| Frontend | Vercel or Netlify              | Root directory `frontend`, build command `npm run build`, output `dist`                |
+
+**Backend environment variables** (set in the Render or Railway dashboard):
+
+```
+DB_HOST, DB_PORT, DB_NAME, DB_USERNAME, DB_PASSWORD   (or a single DB_URL)
+JWT_SECRET=<a long random string, 32+ characters>
+```
+
+- Tables are created on startup. The `PORT` variable is provided by the host.
+- If your cloud MySQL requires SSL (for example, Aiven), set `DB_PARAMS=useSSL=true&serverTimezone=UTC`.
+- For a custom frontend domain, add it to `CORS_ORIGINS`.
+
+**Frontend environment variable** (set in the Vercel or Netlify dashboard):
+
+```
+VITE_API_URL=https://your-backend.onrender.com
+```
+
+`vercel.json` and `netlify.toml` are included so that page refreshes work with client-side routing.
+
+> Note: Render's free tier puts the backend to sleep after about 15 minutes without traffic, which pauses monitoring. For continuous 24/7 monitoring, use an always-on plan or Railway.
+
+## Troubleshooting
+
+| Problem                           | Solution                                                                 |
+| --------------------------------- | ------------------------------------------------------------------------ |
+| `Access denied for user 'root'` | Your MySQL password differs from the default. Set `DB_PASSWORD`.       |
+| `Communications link failure`   | MySQL is not running. Start it (or run `docker compose up -d`).        |
+| Port 8080 or 5173 already in use  | Change `server.port` or stop the other process.                        |
+| Monitor stays "Pending"           | Wait 5-10 seconds for the first check to finish.                         |
+| `npm install` fails on Windows  | Run `npm cache clean --force`, delete `node_modules`, and try again. |
+
+## Roadmap
+
+- Redis caching and rate limiting
+- Public status pages (`/status/{slug}`)
+- CI/CD with GitHub Actions
+- More tests (Mockito for `MonitorCheckProcessor`, `@DataJpaTest`)
+- SSRF protection: block private IP ranges (localhost, 10.x, 192.168.x) in production. They are currently allowed to make local testing easy.
