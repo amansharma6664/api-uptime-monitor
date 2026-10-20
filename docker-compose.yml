@@ -1,0 +1,19 @@
+# OPTIONAL: agar tumhare system me MySQL installed nahi hai to sirf ye chala do:
+#     docker compose up -d
+# Ye MySQL 8 start karega (user: root, password: root, port: 3306)
+# jo application.properties ke default values se match karta hai.
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: uptime-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: uptime_monitor
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+volumes:
+  mysql_data:
